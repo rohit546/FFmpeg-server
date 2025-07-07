@@ -7,7 +7,7 @@ services:
       apt-get update
       apt-get install -y ffmpeg
       pip install -r requirements.txt
-    startCommand: gunicorn main:app
+    startCommand: gunicorn main:app --config gunicorn.conf.py
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0

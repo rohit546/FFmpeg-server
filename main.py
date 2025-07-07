@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, render_template_string
 import os
 import uuid
 import subprocess
@@ -36,15 +36,21 @@ def cleanup_session_folder(session_path):
 
 @app.route('/')
 def hello_world():
-    return '''
-    <h1>Video Creator API</h1>
-    <p>Use POST /create-video with audio file and images to create a video.</p>
-    <p>Send multipart/form-data with:</p>
-    <ul>
-        <li>audio: MP3/WAV audio file</li>
-        <li>images: Multiple image files (JPEG/PNG/WebP)</li>
-    </ul>
-    '''
+    # Read and serve the HTML file
+    try:
+        with open('index.html', 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        return html_content
+    except FileNotFoundError:
+        return '''
+        <h1>Video Creator API</h1>
+        <p>Use POST /create-video with audio file and images to create a video.</p>
+        <p>Send multipart/form-data with:</p>
+        <ul>
+            <li>audio: MP3/WAV audio file</li>
+            <li>images: Multiple image files (JPEG/PNG/WebP)</li>
+        </ul>
+        '''
 
 @app.route('/create-video', methods=['POST'])
 def create_video():
