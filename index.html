@@ -1,0 +1,199 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Creator API Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            border: 2px dashed #ddd;
+            border-radius: 5px;
+            background-color: #fafafa;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 5px;
+            display: none;
+        }
+        .status.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.loading {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .api-info {
+            background-color: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .api-info h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .api-info code {
+            background-color: #f8f9fa;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 Video Creator API</h1>
+        
+        <div class="api-info">
+            <h3>API Endpoint Information</h3>
+            <p><strong>Endpoint:</strong> <code>POST /create-video</code></p>
+            <p><strong>Content-Type:</strong> <code>multipart/form-data</code></p>
+            <p><strong>Parameters:</strong></p>
+            <ul>
+                <li><code>audio</code> - Audio file (MP3, WAV, AAC, M4A)</li>
+                <li><code>images</code> - Multiple image files (JPEG, PNG, WebP)</li>
+            </ul>
+            <p><strong>Returns:</strong> MP4 video file as download</p>
+        </div>
+
+        <form id="videoForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="audio">Select Audio File (MP3, WAV, AAC, M4A):</label>
+                <input type="file" id="audio" name="audio" accept=".mp3,.wav,.aac,.m4a" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="images">Select Image Files (JPEG, PNG, WebP) - Multiple files allowed:</label>
+                <input type="file" id="images" name="images" accept=".jpg,.jpeg,.png,.webp" multiple required>
+            </div>
+            
+            <button type="submit" id="submitBtn">Create Video</button>
+        </form>
+        
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        document.getElementById('videoForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const status = document.getElementById('status');
+            const audioFile = document.getElementById('audio').files[0];
+            const imageFiles = document.getElementById('images').files;
+            
+            // Validation
+            if (!audioFile) {
+                showStatus('Please select an audio file.', 'error');
+                return;
+            }
+            
+            if (imageFiles.length === 0) {
+                showStatus('Please select at least one image file.', 'error');
+                return;
+            }
+            
+            // Prepare form data
+            const formData = new FormData();
+            formData.append('audio', audioFile);
+            
+            for (let i = 0; i < imageFiles.length; i++) {
+                formData.append('images', imageFiles[i]);
+            }
+            
+            // Submit request
+            submitBtn.disabled = true;
+            showStatus('Creating video... This may take a moment.', 'loading');
+            
+            try {
+                const response = await fetch('/create-video', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    // Handle file download
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'created_video.mp4';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    window.URL.revokeObjectURL(url);
+                    
+                    showStatus('Video created successfully! Download should start automatically.', 'success');
+                } else {
+                    const errorData = await response.json();
+                    showStatus(`Error: ${errorData.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Network error: ${error.message}`, 'error');
+            } finally {
+                submitBtn.disabled = false;
+            }
+        });
+        
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
