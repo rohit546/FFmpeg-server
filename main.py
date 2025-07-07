@@ -11,6 +11,10 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
+# Configure Flask for memory optimization
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max request size
+app.config['UPLOAD_FOLDER'] = 'temp_uploads'
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 app.logger.setLevel(logging.INFO)
@@ -19,6 +23,11 @@ app.logger.setLevel(logging.INFO)
 UPLOAD_FOLDER = 'temp_uploads'
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'aac', 'm4a'}
+
+# Memory optimization - limit file sizes
+MAX_AUDIO_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_IMAGE_SIZE = 5 * 1024 * 1024   # 5MB per image
+MAX_IMAGES_COUNT = 20              # Maximum 20 images
 
 # Global cleanup tracker
 cleanup_jobs = []
@@ -88,11 +97,29 @@ def create_video():
         if len(image_files) == 0:
             return jsonify({'error': 'No image files provided'}), 400
         
+        if len(image_files) > MAX_IMAGES_COUNT:
+            return jsonify({'error': f'Too many images. Maximum {MAX_IMAGES_COUNT} allowed'}), 400
+        
+        # Check file sizes to prevent memory issues
+        if len(audio_file.read()) > MAX_AUDIO_SIZE:
+            return jsonify({'error': f'Audio file too large. Maximum {MAX_AUDIO_SIZE//1024//1024}MB allowed'}), 400
+        
+        # Reset file pointer after reading
+        audio_file.seek(0)
+        
         for img in image_files:
             if img.filename == '':
                 return jsonify({'error': 'One or more image files are empty'}), 400
             if not allowed_file(img.filename, ALLOWED_IMAGE_EXTENSIONS):
                 return jsonify({'error': f'Invalid image file format: {img.filename}. Use JPEG, PNG, or WebP'}), 400
+            
+            # Check image size
+            img_size = len(img.read())
+            if img_size > MAX_IMAGE_SIZE:
+                return jsonify({'error': f'Image {img.filename} too large. Maximum {MAX_IMAGE_SIZE//1024//1024}MB per image'}), 400
+            
+            # Reset file pointer after reading
+            img.seek(0)
         
         # Create session folder
         session_path, session_id = create_session_folder()
@@ -104,41 +131,57 @@ def create_video():
             audio_path = os.path.join(session_path, f'audio.{audio_extension}')
             audio_file.save(audio_path)
             
-            # Save and rename images in order
+            # Save and optimize images in order
             image_paths = []
             for i, img in enumerate(image_files):
                 img_filename = f'img{i:03d}.jpg'
                 img_path = os.path.join(session_path, img_filename)
+                
+                # Save the image
                 img.save(img_path)
+                
+                # Optimize image to reduce memory usage
+                optimize_cmd = [
+                    'ffmpeg', '-y', '-i', img_path,
+                    '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease',
+                    '-q:v', '3',  # Good quality but compressed
+                    img_path + '_opt.jpg'
+                ]
+                
+                try:
+                    subprocess.run(optimize_cmd, capture_output=True, text=True, timeout=30)
+                    if os.path.exists(img_path + '_opt.jpg'):
+                        os.remove(img_path)
+                        os.rename(img_path + '_opt.jpg', img_path)
+                except:
+                    pass  # If optimization fails, use original
+                
                 image_paths.append(img_path)
             
             # Create video using FFmpeg
             output_video_path = os.path.join(session_path, 'output_video.mp4')
             
-            # FFmpeg command to create video from images and audio
-            # -framerate 1: 1 frame per second
-            # -i img%03d.jpg: input images pattern
-            # -i audio: input audio file
-            # -c:v libx264: video codec
-            # -c:a aac: audio codec
-            # -pix_fmt yuv420p: pixel format for compatibility
-            # -shortest: end when shortest input ends (audio)
+            # FFmpeg command to create video from images and audio (memory optimized)
             ffmpeg_cmd = [
                 'ffmpeg',
                 '-y',  # Overwrite output file
-                '-framerate', '1',  # 1 frame per second
+                '-framerate', '0.5',  # 0.5 frames per second (slower, less memory)
                 '-i', os.path.join(session_path, 'img%03d.jpg'),  # Input images pattern
                 '-i', audio_path,  # Input audio
                 '-c:v', 'libx264',  # Video codec
+                '-preset', 'fast',  # Faster encoding, less memory
+                '-crf', '23',  # Constant rate factor (good quality)
                 '-c:a', 'aac',  # Audio codec
+                '-b:a', '128k',  # Audio bitrate (lower = less memory)
                 '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
                 '-shortest',  # End when audio ends
+                '-threads', '1',  # Use single thread to limit memory
                 output_video_path
             ]
             
             # Run FFmpeg command with timeout to prevent hanging
             app.logger.info(f'Running FFmpeg command: {" ".join(ffmpeg_cmd)}')
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
             
             if result.returncode != 0:
                 app.logger.error(f'FFmpeg failed with return code {result.returncode}')
@@ -252,12 +295,12 @@ def cleanup_old_files():
                 for session_folder in os.listdir(UPLOAD_FOLDER):
                     session_path = os.path.join(UPLOAD_FOLDER, session_folder)
                     if os.path.isdir(session_path):
-                        # Remove folders older than 1 hour
-                        if time.time() - os.path.getctime(session_path) > 3600:
+                        # Remove folders older than 30 minutes (more aggressive cleanup)
+                        if time.time() - os.path.getctime(session_path) > 1800:
                             shutil.rmtree(session_path)
         except Exception as e:
             print(f"Cleanup error: {e}")
-        time.sleep(300)  # Check every 5 minutes
+        time.sleep(180)  # Check every 3 minutes (more frequent cleanup)
 
 # Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
