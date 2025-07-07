@@ -6,9 +6,14 @@ import shutil
 import atexit
 import threading
 import time
+import logging
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+app.logger.setLevel(logging.INFO)
 
 # Configure upload settings
 UPLOAD_FOLDER = 'temp_uploads'
@@ -55,6 +60,13 @@ def hello_world():
 @app.route('/create-video', methods=['POST'])
 def create_video():
     try:
+        # Check if FFmpeg is available
+        try:
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+        except Exception as e:
+            app.logger.error(f'FFmpeg not available: {str(e)}')
+            return jsonify({'error': 'FFmpeg not available on server'}), 500
+        
         # Check if files are present
         if 'audio' not in request.files:
             return jsonify({'error': 'No audio file provided'}), 400
@@ -125,13 +137,18 @@ def create_video():
             ]
             
             # Run FFmpeg command with timeout to prevent hanging
+            app.logger.info(f'Running FFmpeg command: {" ".join(ffmpeg_cmd)}')
             result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
             
             if result.returncode != 0:
+                app.logger.error(f'FFmpeg failed with return code {result.returncode}')
+                app.logger.error(f'FFmpeg stdout: {result.stdout}')
+                app.logger.error(f'FFmpeg stderr: {result.stderr}')
                 cleanup_session_folder(session_path)
                 return jsonify({
                     'error': 'FFmpeg processing failed',
-                    'details': result.stderr
+                    'details': result.stderr,
+                    'command': ' '.join(ffmpeg_cmd)
                 }), 500
             
             # Check if output video was created
@@ -157,12 +174,41 @@ def create_video():
             
             return response
             
+        except subprocess.TimeoutExpired:
+            cleanup_session_folder(session_path)
+            return jsonify({'error': 'FFmpeg processing timed out'}), 500
         except Exception as e:
+            app.logger.error(f'Processing error: {str(e)}')
             cleanup_session_folder(session_path)
             return jsonify({'error': f'Processing error: {str(e)}'}), 500
             
     except Exception as e:
+        app.logger.error(f'Request error: {str(e)}')
         return jsonify({'error': f'Request error: {str(e)}'}), 500
+
+@app.route('/debug')
+def debug():
+    """Debug endpoint to check server status"""
+    try:
+        # Check FFmpeg availability
+        ffmpeg_result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+        ffmpeg_available = ffmpeg_result.returncode == 0
+        
+        # Check upload folder
+        upload_folder_exists = os.path.exists(UPLOAD_FOLDER)
+        
+        debug_info = {
+            'ffmpeg_available': ffmpeg_available,
+            'ffmpeg_version': ffmpeg_result.stdout.split('\n')[0] if ffmpeg_available else 'Not available',
+            'upload_folder_exists': upload_folder_exists,
+            'upload_folder_path': UPLOAD_FOLDER,
+            'current_working_directory': os.getcwd(),
+            'python_version': subprocess.run(['python', '--version'], capture_output=True, text=True).stdout.strip()
+        }
+        
+        return jsonify(debug_info)
+    except Exception as e:
+        return jsonify({'error': f'Debug error: {str(e)}'}), 500
 
 @app.after_request
 def cleanup_temp_files(response):
