@@ -1,229 +1,195 @@
-from flask import Flask, request, send_file, jsonify, render_template_string
+from flask import Flask, request, send_file, jsonify
 import os
 import uuid
 import subprocess
 import shutil
-import atexit
-import threading
-import time
+import re
 from werkzeug.utils import secure_filename
+from PIL import Image
 
 app = Flask(__name__)
 
-# Configure upload settings
 UPLOAD_FOLDER = 'temp_uploads'
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 ALLOWED_AUDIO_EXTENSIONS = {'mp3', 'wav', 'aac', 'm4a'}
 
-# Global cleanup tracker
-cleanup_jobs = []
-
 def allowed_file(filename, allowed_extensions):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in allowed_extensions
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed_extensions
 
 def create_session_folder():
-    """Create a unique session folder for file processing"""
     session_id = str(uuid.uuid4())
     session_path = os.path.join(UPLOAD_FOLDER, session_id)
     os.makedirs(session_path, exist_ok=True)
     return session_path, session_id
 
 def cleanup_session_folder(session_path):
-    """Remove session folder and all its contents"""
     if os.path.exists(session_path):
         shutil.rmtree(session_path)
+        print(f"🗑️ Cleaned up: {session_path}")
+
+def format_timestamp(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millisecs = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millisecs:03d}"
+
+def get_audio_duration(audio_path):
+    try:
+        result = subprocess.run([
+            'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', audio_path
+        ], capture_output=True, text=True)
+        if result.returncode == 0:
+            return float(result.stdout.strip())
+    except:
+        pass
+    return 60.0  # fallback
+
+def create_subtitles_from_text(text, audio_duration, output_srt_path):
+    try:
+        if not text or not text.strip():
+            print("❌ Empty subtitle text")
+            return False
+
+        # Split text into sentences using punctuation
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            print("❌ No valid sentences")
+            return False
+
+        segment_duration = audio_duration / len(sentences)
+
+        with open(output_srt_path, 'w', encoding='utf-8') as f:
+            for i, sentence in enumerate(sentences):
+                start_time = i * segment_duration
+                end_time = (i + 1) * segment_duration
+                f.write(f"{i + 1}\n")
+                f.write(f"{format_timestamp(start_time)} --> {format_timestamp(end_time)}\n")
+                f.write(f"{sentence}\n\n")
+
+        print("✅ Subtitles created at:", output_srt_path)
+        return True
+    except Exception as e:
+        print(f"Subtitle creation error: {e}")
+        return False
 
 @app.route('/')
-def hello_world():
-    # Read and serve the HTML file
-    try:
-        with open('index.html', 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        return html_content
-    except FileNotFoundError:
-        return '''
-        <h1>Video Creator API</h1>
-        <p>Use POST /create-video with audio file and images to create a video.</p>
-        <p>Send multipart/form-data with:</p>
-        <ul>
-            <li>audio: MP3/WAV audio file</li>
-            <li>images: Multiple image files (JPEG/PNG/WebP)</li>
-        </ul>
-        '''
+def hello():
+    return '''
+    <h1>🎬 Video Creator with Subtitles</h1>
+    <p>POST to /create-video with:</p>
+    <ul>
+        <li><b>audio</b>: .mp3/.wav file</li>
+        <li><b>images</b>: multiple .jpg/.png/.webp files</li>
+        <li><b>subtitle_text</b>: (optional) plain text</li>
+    </ul>
+    '''
 
 @app.route('/create-video', methods=['POST'])
 def create_video():
+    session_path = None
     try:
-        # Check if files are present
-        if 'audio' not in request.files:
-            return jsonify({'error': 'No audio file provided'}), 400
-        
-        if 'images' not in request.files:
-            return jsonify({'error': 'No image files provided'}), 400
-        
+        if 'audio' not in request.files or 'images' not in request.files:
+            return jsonify({'error': 'Missing audio or images'}), 400
+
         audio_file = request.files['audio']
         image_files = request.files.getlist('images')
-        
-        # Validate audio file
-        if audio_file.filename == '':
-            return jsonify({'error': 'No audio file selected'}), 400
-        
-        if not allowed_file(audio_file.filename, ALLOWED_AUDIO_EXTENSIONS):
-            return jsonify({'error': 'Invalid audio file format. Use MP3, WAV, AAC, or M4A'}), 400
-        
-        # Validate image files
-        if len(image_files) == 0:
-            return jsonify({'error': 'No image files provided'}), 400
-        
-        for img in image_files:
-            if img.filename == '':
-                return jsonify({'error': 'One or more image files are empty'}), 400
-            if not allowed_file(img.filename, ALLOWED_IMAGE_EXTENSIONS):
-                return jsonify({'error': f'Invalid image file format: {img.filename}. Use JPEG, PNG, or WebP'}), 400
-        
-        # Create session folder
+        subtitle_text = request.form.get('subtitle_text', '').strip()
+
+        if audio_file.filename == '' or not allowed_file(audio_file.filename, ALLOWED_AUDIO_EXTENSIONS):
+            return jsonify({'error': 'Invalid or missing audio file'}), 400
+
+        if not image_files or any(img.filename == '' or not allowed_file(img.filename, ALLOWED_IMAGE_EXTENSIONS) for img in image_files):
+            return jsonify({'error': 'Invalid or missing image files'}), 400
+
         session_path, session_id = create_session_folder()
-        
+
         try:
-            # Save audio file
-            audio_filename = secure_filename(audio_file.filename)
-            audio_extension = audio_filename.rsplit('.', 1)[1].lower()
-            audio_path = os.path.join(session_path, f'audio.{audio_extension}')
+            # Save audio
+            audio_path = os.path.join(session_path, 'audio.' + audio_file.filename.rsplit('.', 1)[1].lower())
             audio_file.save(audio_path)
-            
-            # Save and rename images in order
-            image_paths = []
-            for i, img in enumerate(image_files):
-                img_filename = f'img{i:03d}.jpg'
-                img_path = os.path.join(session_path, img_filename)
-                img.save(img_path)
-                image_paths.append(img_path)
-            
-            # Create video using FFmpeg
-            output_video_path = os.path.join(session_path, 'output_video.mp4')
-            
-            # FFmpeg command to create video from images and audio
-            # -framerate 1: 1 frame per second
-            # -i img%03d.jpg: input images pattern
-            # -i audio: input audio file
-            # -c:v libx264: video codec
-            # -c:a aac: audio codec
-            # -pix_fmt yuv420p: pixel format for compatibility
-            # -shortest: end when shortest input ends (audio)
+
+            # Convert and save all images to JPG format
+            for i, img_file in enumerate(image_files):
+                img = Image.open(img_file)
+                rgb_img = img.convert('RGB')  # Ensures compatibility with JPG
+                rgb_img.save(os.path.join(session_path, f'img{i:03d}.jpg'), format='JPEG')
+
+            # Get duration
+            audio_duration = get_audio_duration(audio_path)
+
+            # Subtitle processing
+            subtitle_success = False
+            srt_path = os.path.abspath(os.path.join(session_path, 'subtitles.srt'))
+
+            if subtitle_text:
+                subtitle_success = create_subtitles_from_text(subtitle_text, audio_duration, srt_path)
+
+            # FFmpeg build
+            framerate = len(image_files) / audio_duration
+            output_path = os.path.join(session_path, 'video.mp4')
             ffmpeg_cmd = [
-                'ffmpeg',
-                '-y',  # Overwrite output file
-                '-framerate', '1',  # 1 frame per second
-                '-i', os.path.join(session_path, 'img%03d.jpg'),  # Input images pattern
-                '-i', audio_path,  # Input audio
-                '-c:v', 'libx264',  # Video codec
-                '-c:a', 'aac',  # Audio codec
-                '-pix_fmt', 'yuv420p',  # Pixel format for compatibility
-                '-shortest',  # End when audio ends
-                output_video_path
+                'ffmpeg', '-y', '-framerate', str(framerate), '-i',
+                os.path.join(session_path, 'img%03d.jpg'), '-i', audio_path,
+                '-c:v', 'libx264', '-c:a', 'aac', '-pix_fmt', 'yuv420p', '-shortest'
             ]
-            
-            # Run FFmpeg command with timeout to prevent hanging
-            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
-            
-            if result.returncode != 0:
-                cleanup_session_folder(session_path)
+
+            if subtitle_success:
+                ffmpeg_cmd += ['-vf', f"subtitles='{srt_path.replace(os.sep, '/')}'"]
+                print("✅ Subtitles will be embedded")
+
+            ffmpeg_cmd.append(output_path)
+
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            print("FFmpeg stderr:\n", result.stderr)
+
+            if result.returncode != 0 or not os.path.exists(output_path):
                 return jsonify({
-                    'error': 'FFmpeg processing failed',
-                    'details': result.stderr
+                    'error': 'FFmpeg failed',
+                    'stderr': result.stderr
                 }), 500
-            
-            # Check if output video was created
-            if not os.path.exists(output_video_path):
-                cleanup_session_folder(session_path)
-                return jsonify({'error': 'Video creation failed - output file not found'}), 500
-            
-            # Send the video file
-            response = send_file(
-                output_video_path,
+
+            # Read the video file into memory before cleanup
+            with open(output_path, 'rb') as f:
+                video_data = f.read()
+
+            # Clean up temp files immediately after reading video
+            cleanup_session_folder(session_path)
+            session_path = None  # Mark as cleaned
+
+            # Return video from memory
+            from io import BytesIO
+            video_buffer = BytesIO(video_data)
+            video_buffer.seek(0)
+
+            return send_file(
+                video_buffer,
                 as_attachment=True,
                 download_name=f'video_{session_id}.mp4',
                 mimetype='video/mp4'
             )
-            
-            # Schedule cleanup after response is sent
-            def delayed_cleanup():
-                time.sleep(5)  # Wait 5 seconds before cleanup
-                cleanup_session_folder(session_path)
-            
-            cleanup_thread = threading.Thread(target=delayed_cleanup, daemon=True)
-            cleanup_thread.start()
-            
-            return response
-            
+
         except Exception as e:
-            cleanup_session_folder(session_path)
-            return jsonify({'error': f'Processing error: {str(e)}'}), 500
-            
+            import traceback
+            return jsonify({
+                'error': f'Processing error: {e}',
+                'traceback': traceback.format_exc()
+            }), 500
+
     except Exception as e:
-        return jsonify({'error': f'Request error: {str(e)}'}), 500
+        import traceback
+        return jsonify({
+            'error': f'Request failed: {e}',
+            'traceback': traceback.format_exc()
+        }), 500
 
-@app.after_request
-def cleanup_temp_files(response):
-    """Clean up temporary files after request"""
-    # Note: This is a simple cleanup. In production, you might want a more sophisticated cleanup strategy
-    return response
-
-def periodic_cleanup():
-    """Periodically clean up old session folders"""
-    while True:
-        try:
-            # Get current time
-            now = time.time()
-            
-            # Iterate over session folders in the upload directory
-            for folder in os.listdir(UPLOAD_FOLDER):
-                folder_path = os.path.join(UPLOAD_FOLDER, folder)
-                
-                # Skip if not a directory
-                if not os.path.isdir(folder_path):
-                    continue
-                
-                # Get folder creation time
-                folder_creation_time = os.path.getctime(folder_path)
-                
-                # If folder is older than 1 hour, delete it
-                if now - folder_creation_time > 3600:
-                    shutil.rmtree(folder_path)
-        
-        except Exception as e:
-            app.logger.error(f'Error during periodic cleanup: {str(e)}')
-        
-        # Sleep for 10 minutes
-        time.sleep(600)
-
-def cleanup_old_files():
-    """Background cleanup of old temporary files"""
-    while True:
-        try:
-            if os.path.exists(UPLOAD_FOLDER):
-                for session_folder in os.listdir(UPLOAD_FOLDER):
-                    session_path = os.path.join(UPLOAD_FOLDER, session_folder)
-                    if os.path.isdir(session_path):
-                        # Remove folders older than 1 hour
-                        if time.time() - os.path.getctime(session_path) > 3600:
-                            shutil.rmtree(session_path)
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-        time.sleep(300)  # Check every 5 minutes
-
-# Start cleanup thread
-cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
-cleanup_thread.start()
+    finally:
+        # Ensure cleanup happens no matter what
+        if session_path and os.path.exists(session_path):
+            cleanup_session_folder(session_path)
 
 if __name__ == "__main__":
-    # Create upload directory if it doesn't exist
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    
-    # Start periodic cleanup thread
-    cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
-    cleanup_thread.start()
-    
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host="0.0.0.0", port=8080, debug=True)
